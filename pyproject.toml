@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpsarena"
+version = "0.1.0"
+description = "A simulation of Rock Paper Scissors units chasing each other in a GUI window. Highly configurable."
+readme = "README.md"
+requires-python = ">=3.2"
+authors = [{name = "Al Sweigart" }]
+classifiers = [
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Topic :: Games/Entertainment :: Simulation",
+  "Topic :: Scientific/Engineering :: Artificial Life",
+  "License :: OSI Approved :: MIT License"
+]
+
+[project.scripts]
+rpsarena = "rpsarena:main"
