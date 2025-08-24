@@ -22,7 +22,7 @@ ALLY_REPEL = 1.3            # mild repel from allies to avoid clumping
 WALL_BOUNCE = 0.9           # bounce damping
 JITTER = 0.25               # tiny noise to prevent stalemates
 
-RESTART_DELAY_MS = 5000     # 5 second delay before starting a new arena
+POSTGAME_DELAY_MS = 5000     # 5 second delay before starting a new arena
 
 DEFAULT_EMOJI = {
     "rock": u"🪨",
@@ -74,7 +74,8 @@ def cap_speed(vx, vy, cap):
 class RPSArena(object):
     def __init__(self, root, width, height, num_units, delay_ms,
                  emoji=None, beats=None, loses_to=None,
-                 fixed_seed=None, log_filename=LOG_FILENAME, ff_enabled=True,
+                 fixed_seed=None, num_games=0,
+                 log_filename=LOG_FILENAME, ff_enabled=True,
                  background_color=DEFAULT_BACKGROUND, countdown_s=0):
         self.root = root
         self.width = int(width)
@@ -105,6 +106,10 @@ class RPSArena(object):
 
         # Stable order for logging
         self.kinds_order = sorted(list(self.emoji.keys()))
+
+        # Multi-game controls
+        self.num_games = max(0, int(num_games))  # 0 = unlimited
+        self.games_played = 0
 
         # Seed handling
         self.fixed_seed = fixed_seed  # None or int
@@ -139,10 +144,12 @@ class RPSArena(object):
 
     def _write_log_header(self):
         now = datetime.datetime.now().isoformat(" ")
-        settings = ("start={0} | size={1}x{2} | units={3} | delay_ms={4} | seed={5} | kinds={6} | fast_forward={7}"
+        settings = ("start={0} | size={1}x{2} | units={3} | delay_ms={4} | seed={5} | kinds={6} | fast_forward={7} | num_games={8}"
                     .format(now, self.width, self.height, self.num_units, self.delay_ms,
-                            self.current_seed, ",".join(self.kinds_order),
-                            "on" if self.ff_enabled else "off"))
+                            self.current_seed if self.fixed_seed is not None else "random",
+                            ",".join(self.kinds_order),
+                            "on" if self.ff_enabled else "off",
+                            self.num_games))
         self.logf.write(settings + "\n")
         header = ["STEP"]
         for k in self.kinds_order:
@@ -416,17 +423,32 @@ class RPSArena(object):
         kinds = set([u.kind for u in self.units])
         if len(kinds) == 1:
             self._log_game_end()
-            if self.fixed_seed is not None:
-                # One game only; stop scheduling resets
+            self.games_played += 1
+
+            # If we've reached the requested number of games, close after delay
+            if self.num_games > 0 and self.games_played >= self.num_games:
+                self._restart_after_id = self.root.after(POSTGAME_DELAY_MS, self.root.destroy)
                 return True
-            self._restart_after_id = self.root.after(RESTART_DELAY_MS, self._do_reset_with_new_seed)
+
+            # Otherwise schedule reset into next game after delay
+            self._restart_after_id = self.root.after(POSTGAME_DELAY_MS, self._do_reset_next_game)
             return True
         return False
 
-    def _do_reset_with_new_seed(self):
+
+    def _do_reset_next_game(self):
         self._restart_after_id = None
-        self.current_seed = random.randint(1, 1000000)
-        random.seed(self.current_seed)
+
+        # Advance / choose next seed
+        if self.fixed_seed is not None:
+            # Deterministic sequence S, S+1, S+2, ...
+            self.current_seed += 1
+            random.seed(self.current_seed)
+        else:
+            # Fresh random seed each game
+            self.current_seed = random.randint(1, 1000000)
+            random.seed(self.current_seed)
+
         self.reset()
         self._maybe_start_countdown()
 
@@ -465,7 +487,9 @@ def parse_args():
     p.add_argument("-d", "--delay", type=int, default=DEFAULT_DELAY_MS,
                    help=f"Tick delay in ms (0 coerced to 1) (default {DEFAULT_DELAY_MS})")
     p.add_argument("--seed", type=int, default=None,
-                   help="Random seed (if set, play one game only and exit)")
+                   help="Random seed for first game; subsequent games use seed+1, seed+2, ...")
+    p.add_argument("-n", "--num-games", type=int, default=0,
+                   help="Number of games to play (0 = unlimited; default 0). The app closes after the last game.")
     p.add_argument("--noff", action="store_true",
                    help="Disable Fast Forward (no auto-switch to delay=1)")
     p.add_argument("--bg", type=str, default=DEFAULT_BACKGROUND,
@@ -492,9 +516,9 @@ def main():
 
     RPSArena(root, width, height, args.units, delay_ms,
              emoji=DEFAULT_EMOJI, beats=DEFAULT_BEATS, loses_to=DEFAULT_LOSES_TO,
-             fixed_seed=args.seed, log_filename=LOG_FILENAME,
-             ff_enabled=(not args.noff), background_color=background_color,
-             countdown_s=args.countdown)
+             fixed_seed=args.seed, num_games=args.num_games,
+             log_filename=LOG_FILENAME, ff_enabled=(not args.noff),
+             background_color=background_color, countdown_s=args.countdown)
     root.mainloop()
 
 if __name__ == "__main__":
