@@ -6,10 +6,10 @@ import datetime
 import tkinter as tk
 
 # ---------------- Configuration defaults ----------------
-DEFAULT_WIDTH, DEFAULT_HEIGHT = 1000, 700
+DEFAULT_WIDTH, DEFAULT_HEIGHT = 800, 800
 DEFAULT_NUM_EMOJIS = 150
 DEFAULT_DELAY_MS = 30       # tick delay; 0 requested -> coerced to 1
-BACKGROUND = "white"
+DEFAULT_BACKGROUND = "white"
 
 FONT_SIZE = 24              # emoji font size
 RADIUS = 14                 # approximate collision radius for an emoji at FONT_SIZE
@@ -74,7 +74,7 @@ def cap_speed(vx, vy, cap):
 class RPSArena(object):
     def __init__(self, root, width, height, num_units, delay_ms,
                  emoji=None, beats=None, loses_to=None,
-                 fixed_seed=None, log_filename=LOG_FILENAME, ff_enabled=True):
+                 fixed_seed=None, log_filename=LOG_FILENAME, ff_enabled=True, background_color=DEFAULT_BACKGROUND):
         self.root = root
         self.width = int(width)
         self.height = int(height)
@@ -114,7 +114,7 @@ class RPSArena(object):
         # UI (fixed title)
         self.root.title(u"RPS Arena")
         self.canvas = tk.Canvas(root, width=self.width, height=self.height,
-                                bg=BACKGROUND, highlightthickness=0)
+                                bg=background_color, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
         self.units = []
@@ -416,6 +416,8 @@ def parse_args():
                    help="Random seed (if set, play one game only and exit)")
     p.add_argument("--noff", action="store_true",
                    help="Disable Fast Forward (no auto-switch to delay=1)")
+    p.add_argument("--bg", type=str, default=DEFAULT_BACKGROUND,
+                   help="Background color (default {0})".format(DEFAULT_BACKGROUND))
     return p.parse_args()
 
 def main():
@@ -426,9 +428,10 @@ def main():
         width, height = DEFAULT_WIDTH, DEFAULT_HEIGHT
 
     delay_ms = args.delay if args.delay > 0 else 1
+    background_color = args.bg
 
     root = tk.Tk()
-    root.configure(bg=BACKGROUND)
+    root.configure(bg=background_color)
     root.geometry("{0}x{1}".format(width, height))
     root.resizable(False, False)  # fixed-size window
     root.title("RPS Arena")
@@ -436,7 +439,7 @@ def main():
     RPSArena(root, width, height, args.units, delay_ms,
              emoji=DEFAULT_EMOJI, beats=DEFAULT_BEATS, loses_to=DEFAULT_LOSES_TO,
              fixed_seed=args.seed, log_filename=LOG_FILENAME,
-             ff_enabled=(not args.noff))
+             ff_enabled=(not args.noff), background_color=background_color)
     root.mainloop()
 
 if __name__ == "__main__":
