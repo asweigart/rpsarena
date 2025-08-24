@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 import random
 import math
 import argparse
@@ -9,7 +7,7 @@ import tkinter as tk
 
 # ---------------- Configuration defaults ----------------
 DEFAULT_WIDTH, DEFAULT_HEIGHT = 1000, 700
-DEFAULT_UNITS = 150
+DEFAULT_NUM_EMOJIS = 150
 DEFAULT_DELAY_MS = 30       # tick delay; 0 requested -> coerced to 1
 BACKGROUND = "white"
 
@@ -20,11 +18,11 @@ MIN_SEP = RADIUS * 2 + 6    # minimum separation for initial placement
 BASE_SPEED = 2.2            # movement cap per tick
 ATTRACTION = 1.6            # toward prey
 REPULSION = 1.8             # away from predators
-ALLY_REPEL = 0.3            # mild repel from allies to avoid clumping
+ALLY_REPEL = 1.3            # mild repel from allies to avoid clumping
 WALL_BOUNCE = 0.9           # bounce damping
 JITTER = 0.25               # tiny noise to prevent stalemates
 
-RESTART_DELAY_MS = 5000
+RESTART_DELAY_MS = 5000     # 5 second delay before starting a new arena
 
 DEFAULT_EMOJI = {
     "rock": u"🪨",
@@ -45,7 +43,7 @@ DEFAULT_LOSES_TO = {
 LOG_FILENAME = "rps_arena_log.txt"
 
 # ---------------- Data model ----------------
-class Unit(object):
+class Emoji(object):
     def __init__(self, kind, x, y, vx, vy, item):
         self.kind = kind
         self.x = x
@@ -55,8 +53,8 @@ class Unit(object):
         self.item = item  # Canvas item id
 
 # ---------------- Helpers ----------------
-def dist2(ax, ay, bx, by):
-    dx, dy = ax - bx, ay - by
+def distance_between(x1, y1, x2, y2):
+    dx, dy = x1 - x2, y1 - y2
     return dx*dx + dy*dy
 
 def normalize(dx, dy):
@@ -71,10 +69,6 @@ def cap_speed(vx, vy, cap):
         scale = cap / s
         return vx * scale, vy * scale
     return vx, vy
-
-def choose_seed():
-    sysrand = random.SystemRandom()
-    return sysrand.randrange(1, 2**31 - 1)
 
 # ---------------- Simulation ----------------
 class RPSArena(object):
@@ -107,14 +101,14 @@ class RPSArena(object):
         # Seed handling
         self.fixed_seed = fixed_seed  # None or int
         if self.fixed_seed is None:
-            self.current_seed = choose_seed()
+            self.current_seed = random.randint(1, 1000000)
         else:
             self.current_seed = int(self.fixed_seed)
         random.seed(self.current_seed)
 
         # Logging
         self.log_filename = log_filename
-        self.logf = open(self.log_filename, "w")
+        self.logf = open(self.log_filename, "a")
         self._write_log_header()
 
         # UI (fixed title)
@@ -140,7 +134,7 @@ class RPSArena(object):
                             self.current_seed, ",".join(self.kinds_order),
                             "on" if self.ff_enabled else "off"))
         self.logf.write(settings + "\n")
-        header = ["step"]
+        header = ["STEP"]
         for k in self.kinds_order:
             header.append(self.emoji.get(k, k))
         self.logf.write(",".join([unicode_safe(h) for h in header]) + "\n")
@@ -203,7 +197,7 @@ class RPSArena(object):
 
             too_close = False
             for u in self.units:
-                if dist2(x, y, u.x, u.y) < (MIN_SEP * MIN_SEP):
+                if distance_between(x, y, u.x, u.y) < (MIN_SEP * MIN_SEP):
                     too_close = True
                     break
             if too_close:
@@ -219,7 +213,7 @@ class RPSArena(object):
             angle = random.uniform(0, 2*math.pi)
             speed = random.uniform(0, BASE_SPEED)
             vx, vy = math.cos(angle)*speed, math.sin(angle)*speed
-            self.units.append(Unit(kind, x, y, vx, vy, item))
+            self.units.append(Emoji(kind, x, y, vx, vy, item))
             placed += 1
 
         # If we couldn't meet min-sep for all, finish placement without the constraint
@@ -232,7 +226,7 @@ class RPSArena(object):
             angle = random.uniform(0, 2*math.pi)
             speed = random.uniform(0, BASE_SPEED)
             vx, vy = math.cos(angle)*speed, math.sin(angle)*speed
-            self.units.append(Unit(k, x, y, vx, vy, item))
+            self.units.append(Emoji(k, x, y, vx, vy, item))
 
         # Title remains fixed as "RPS Arena"
 
@@ -249,7 +243,7 @@ class RPSArena(object):
         for u in self.units:
             if u is me:
                 continue
-            d2 = dist2(me.x, me.y, u.x, u.y)
+            d2 = distance_between(me.x, me.y, u.x, u.y)
             if u.kind == prey_kind and d2 < best_prey_d2:
                 best_prey_d2 = d2
                 closest_prey = u
@@ -282,7 +276,7 @@ class RPSArena(object):
         for u in self.units:
             if u is me or u.kind != me.kind:
                 continue
-            d2 = dist2(me.x, me.y, u.x, u.y)
+            d2 = distance_between(me.x, me.y, u.x, u.y)
             if d2 < (MIN_SEP * MIN_SEP):
                 dx, dy = normalize(me.x - u.x, me.y - u.y)
                 denom = max(math.sqrt(d2), 1.0)
@@ -340,7 +334,7 @@ class RPSArena(object):
             j = i + 1
             while j < n:
                 b = self.units[j]
-                if a.kind != b.kind and dist2(a.x, a.y, b.x, b.y) <= r2:
+                if a.kind != b.kind and distance_between(a.x, a.y, b.x, b.y) <= r2:
                     if self.beats[a.kind] == b.kind:
                         b.kind = a.kind
                         self.canvas.itemconfigure(b.item, text=self.emoji[b.kind])
@@ -382,7 +376,7 @@ class RPSArena(object):
 
     def _do_reset_with_new_seed(self):
         self._restart_after_id = None
-        self.current_seed = choose_seed()
+        self.current_seed = random.randint(1, 1000000)
         random.seed(self.current_seed)
         self.reset()
 
@@ -414,8 +408,8 @@ def parse_args():
     )
     p.add_argument("-s", "--size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
                    help="Window size as WIDTH HEIGHT (default {0} {1})".format(DEFAULT_WIDTH, DEFAULT_HEIGHT))
-    p.add_argument("-u", "--units", type=int, default=DEFAULT_UNITS,
-                   help="Total unit count (default {0})".format(DEFAULT_UNITS))
+    p.add_argument("-u", "--units", type=int, default=DEFAULT_NUM_EMOJIS,
+                   help="Total unit count (default {0})".format(DEFAULT_NUM_EMOJIS))
     p.add_argument("-d", "--delay", type=int, default=DEFAULT_DELAY_MS,
                    help="Tick delay in ms (0 coerced to 1) (default {0})".format(DEFAULT_DELAY_MS))
     p.add_argument("--seed", type=int, default=None,
