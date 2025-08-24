@@ -74,7 +74,8 @@ def cap_speed(vx, vy, cap):
 class RPSArena(object):
     def __init__(self, root, width, height, num_units, delay_ms,
                  emoji=None, beats=None, loses_to=None,
-                 fixed_seed=None, log_filename=LOG_FILENAME, ff_enabled=True, background_color=DEFAULT_BACKGROUND):
+                 fixed_seed=None, log_filename=LOG_FILENAME, ff_enabled=True,
+                 background_color=DEFAULT_BACKGROUND, countdown_s=0):
         self.root = root
         self.width = int(width)
         self.height = int(height)
@@ -89,6 +90,13 @@ class RPSArena(object):
         # Fast Forward
         self.ff_enabled = bool(ff_enabled)
         self.ff_active = False
+
+        # Countdown
+        self.countdown_s = max(0, int(countdown_s))
+        self._in_countdown = False
+        self._countdown_remaining = 0
+        self._countdown_item = None
+        self._countdown_after_id = None
 
         # Dictionaries (allow custom games)
         self.emoji = emoji if emoji is not None else DEFAULT_EMOJI
@@ -111,7 +119,7 @@ class RPSArena(object):
         self.logf = open(self.log_filename, "a")
         self._write_log_header()
 
-        # UI (fixed title)
+        # UI
         self.root.title(u"RPS Arena")
         self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                 bg=background_color, highlightthickness=0)
@@ -124,7 +132,9 @@ class RPSArena(object):
         self.step_num = 0
         self.game_start_time = time.time()
 
+        # First game
         self.reset()
+        self._maybe_start_countdown()
         self.step()
 
     def _write_log_header(self):
@@ -153,7 +163,6 @@ class RPSArena(object):
     def _log_game_end(self):
         end_ts = datetime.datetime.now().isoformat(" ")
         elapsed = time.time() - self.game_start_time
-        # Include total step count in end message
         msg = "game_end at {0}; elapsed={1:.3f}s; steps={2}".format(end_ts, elapsed, self.step_num)
         self.logf.write(msg + "\n")
         self.logf.flush()
@@ -168,15 +177,19 @@ class RPSArena(object):
         if self._restart_after_id is not None:
             self.root.after_cancel(self._restart_after_id)
             self._restart_after_id = None
+        if self._countdown_after_id is not None:
+            self.root.after_cancel(self._countdown_after_id)
+            self._countdown_after_id = None
 
         self.canvas.delete("all")
         self.units = []
         self.step_num = 0
         self.game_start_time = time.time()
         self.ff_active = False
-        self.delay_ms = self.base_delay_ms  # restore original delay each game
+        self._in_countdown = False
+        self.delay_ms = self.base_delay_ms
+        self._countdown_item = None  # invalidate old item (deleted with canvas)
 
-        # Even split among kinds (sprinkle remainder randomly)
         kinds_list = list(self.kinds_order)
         kinds = []
         n_each = self.num_units // len(kinds_list)
@@ -186,7 +199,6 @@ class RPSArena(object):
             kinds.append(random.choice(kinds_list))
         random.shuffle(kinds)
 
-        # Place with minimum separation
         placed = 0
         attempts = 0
         max_attempts = self.num_units * 250
@@ -216,7 +228,6 @@ class RPSArena(object):
             self.units.append(Emoji(kind, x, y, vx, vy, item))
             placed += 1
 
-        # If we couldn't meet min-sep for all, finish placement without the constraint
         for k in kinds[placed:]:
             x = random.uniform(RADIUS + 2, self.width - RADIUS - 2)
             y = random.uniform(RADIUS + 2, self.height - RADIUS - 2)
@@ -228,9 +239,52 @@ class RPSArena(object):
             vx, vy = math.cos(angle)*speed, math.sin(angle)*speed
             self.units.append(Emoji(k, x, y, vx, vy, item))
 
-        # Title remains fixed as "RPS Arena"
+    # --- Countdown handling ---
+    def _maybe_start_countdown(self):
+        if self.countdown_s <= 0:
+            self._in_countdown = False
+            if self._countdown_item is not None:
+                self.canvas.itemconfigure(self._countdown_item, state="hidden")
+            return
 
-    # --- Single (closest-choice) strategy ---
+        self._in_countdown = True
+        self._countdown_remaining = int(self.countdown_s)
+
+        if self._countdown_item is None:
+            approx = int(min(self.width, self.height) * 0.25)
+            font_size = max(48, min(approx, 220))
+            self._countdown_item = self.canvas.create_text(
+                self.width / 2, self.height / 2,
+                text="",
+                font=("Helvetica", font_size, "bold"),
+                fill="black",
+                anchor="center"
+            )
+        self.canvas.itemconfigure(self._countdown_item, state="normal")
+        self._update_countdown()
+
+    def _update_countdown(self):
+        if not self._in_countdown:
+            return
+
+        self.canvas.itemconfigure(self._countdown_item, text=str(self._countdown_remaining))
+
+        if self._countdown_remaining <= 0:
+            self._end_countdown()
+            return
+
+        self._countdown_remaining -= 1
+        self._countdown_after_id = self.root.after(1000, self._update_countdown)
+
+    def _end_countdown(self):
+        self._in_countdown = False
+        if self._countdown_item is not None:
+            self.canvas.itemconfigure(self._countdown_item, state="hidden")
+        if self._countdown_after_id is not None:
+            self.root.after_cancel(self._countdown_after_id)
+            self._countdown_after_id = None
+
+    # --- Behavior/physics ---
     def _force_closest_choice(self, me):
         prey_kind = self.beats[me.kind]
         predator_kind = self.loses_to[me.kind]
@@ -251,9 +305,7 @@ class RPSArena(object):
                 best_pred_d2 = d2
                 closest_pred = u
 
-        fx = 0.0
-        fy = 0.0
-
+        fx, fy = 0.0, 0.0
         if closest_prey is not None and closest_pred is not None:
             if best_prey_d2 <= best_pred_d2:
                 dx, dy = normalize(closest_prey.x - me.x, closest_prey.y - me.y)
@@ -347,29 +399,26 @@ class RPSArena(object):
             i += 1
         return converted
 
-    # --- Fast Forward detection: two kinds left & one beats the other ---
+    # --- Fast forward when only a resolvable matchup remains ---
     def _maybe_fast_forward(self):
         if not self.ff_enabled or self.ff_active:
             return
         kinds_present = set([u.kind for u in self.units])
         if len(kinds_present) != 2:
             return
-        kinds = list(kinds_present)
-        a, b = kinds[0], kinds[1]
+        a, b = list(kinds_present)
         if (self.beats.get(a) == b) or (self.beats.get(b) == a):
             if self.delay_ms > 1:
                 self.delay_ms = 1
                 self.ff_active = True
-                # Title stays "RPS Arena"
 
     def _check_end(self):
         kinds = set([u.kind for u in self.units])
         if len(kinds) == 1:
             self._log_game_end()
             if self.fixed_seed is not None:
-                # One game only; stop
+                # One game only; stop scheduling resets
                 return True
-            # Otherwise, schedule reset with a NEW random seed
             self._restart_after_id = self.root.after(RESTART_DELAY_MS, self._do_reset_with_new_seed)
             return True
         return False
@@ -379,8 +428,14 @@ class RPSArena(object):
         self.current_seed = random.randint(1, 1000000)
         random.seed(self.current_seed)
         self.reset()
+        self._maybe_start_countdown()
 
     def step(self):
+        # Pause physics while countdown is visible
+        if self._in_countdown:
+            self.root.after(self.delay_ms, self.step)
+            return
+
         if self._restart_after_id is None:
             self.step_num += 1
             for u in self.units:
@@ -390,8 +445,7 @@ class RPSArena(object):
             converted = self._handle_collisions_and_conversions()
             self._log_counts_if_needed(converted)
             self._maybe_fast_forward()
-            if not self._check_end():
-                pass  # Title remains "RPS Arena"
+            self._check_end()
         self.root.after(self.delay_ms, self.step)
 
 # ---------------- Utility ----------------
@@ -403,21 +457,21 @@ def unicode_safe(x):
 
 # ---------------- CLI / Main ----------------
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="RPS Arena (closest-choice strategy)."
-    )
+    p = argparse.ArgumentParser(description="RPS Arena (closest-choice strategy).")
     p.add_argument("-s", "--size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
-                   help="Window size as WIDTH HEIGHT (default {0} {1})".format(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+                   help=f"Window size as WIDTH HEIGHT (default {DEFAULT_WIDTH} {DEFAULT_HEIGHT})")
     p.add_argument("-u", "--units", type=int, default=DEFAULT_NUM_EMOJIS,
-                   help="Total unit count (default {0})".format(DEFAULT_NUM_EMOJIS))
+                   help=f"Total unit count (default {DEFAULT_NUM_EMOJIS})")
     p.add_argument("-d", "--delay", type=int, default=DEFAULT_DELAY_MS,
-                   help="Tick delay in ms (0 coerced to 1) (default {0})".format(DEFAULT_DELAY_MS))
+                   help=f"Tick delay in ms (0 coerced to 1) (default {DEFAULT_DELAY_MS})")
     p.add_argument("--seed", type=int, default=None,
                    help="Random seed (if set, play one game only and exit)")
     p.add_argument("--noff", action="store_true",
                    help="Disable Fast Forward (no auto-switch to delay=1)")
     p.add_argument("--bg", type=str, default=DEFAULT_BACKGROUND,
-                   help="Background color (default {0})".format(DEFAULT_BACKGROUND))
+                   help=f"Background color (default {DEFAULT_BACKGROUND})")
+    p.add_argument("--countdown", type=int, default=0,
+                   help="Seconds to pause after placement and show a centered countdown. Default 0 = off.")
     return p.parse_args()
 
 def main():
@@ -432,14 +486,15 @@ def main():
 
     root = tk.Tk()
     root.configure(bg=background_color)
-    root.geometry("{0}x{1}".format(width, height))
-    root.resizable(False, False)  # fixed-size window
+    root.geometry(f"{width}x{height}")
+    root.resizable(False, False)
     root.title("RPS Arena")
 
     RPSArena(root, width, height, args.units, delay_ms,
              emoji=DEFAULT_EMOJI, beats=DEFAULT_BEATS, loses_to=DEFAULT_LOSES_TO,
              fixed_seed=args.seed, log_filename=LOG_FILENAME,
-             ff_enabled=(not args.noff), background_color=background_color)
+             ff_enabled=(not args.noff), background_color=background_color,
+             countdown_s=args.countdown)
     root.mainloop()
 
 if __name__ == "__main__":
