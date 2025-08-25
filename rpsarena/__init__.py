@@ -70,6 +70,86 @@ def cap_speed(vx, vy, cap):
         return vx * scale, vy * scale
     return vx, vy
 
+# --- Color utilities (no Tk dependency required) ---
+_COLOR_NAME_MAP = {
+    # CSS basic colors
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "red": (255, 0, 0),
+    "green": (0, 128, 0),
+    "blue": (0, 0, 255),
+    "yellow": (255, 255, 0),
+    "magenta": (255, 0, 255),
+    "fuchsia": (255, 0, 255),
+    "cyan": (0, 255, 255),
+    "aqua": (0, 255, 255),
+    "gray": (128, 128, 128),
+    "grey": (128, 128, 128),
+    "lightgray": (211, 211, 211),
+    "lightgrey": (211, 211, 211),
+    "darkgray": (169, 169, 169),
+    "darkgrey": (169, 169, 169),
+    "navy": (0, 0, 128),
+    "maroon": (128, 0, 0),
+    "purple": (128, 0, 128),
+    "teal": (0, 128, 128),
+    "olive": (128, 128, 0),
+    "silver": (192, 192, 192),
+    "lime": (0, 255, 0),
+    "orange": (255, 165, 0),
+    "pink": (255, 192, 203),
+    "brown": (165, 42, 42),
+}
+
+def _parse_hex_color(s):
+    s = s.strip()
+    if not s.startswith("#"):
+        return None
+    s = s[1:]
+    if len(s) == 3:
+        r = int(s[0]*2, 16)
+        g = int(s[1]*2, 16)
+        b = int(s[2]*2, 16)
+        return (r, g, b)
+    if len(s) == 6:
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        return (r, g, b)
+    return None
+
+def _rgb_from_name_or_hex(color_str):
+    if not isinstance(color_str, str):
+        return None
+    c = color_str.strip().lower()
+    rgb = _parse_hex_color(c)
+    if rgb is not None:
+        return rgb
+    if c in _COLOR_NAME_MAP:
+        return _COLOR_NAME_MAP[c]
+    return None
+
+def pick_contrast_color(bgcolor, tk_root=None):
+    """
+    Return 'black' or 'white' contrasting with bgcolor.
+    - First tries to parse known names / hex (#RGB/#RRGGBB) w/o Tk.
+    - If that fails and tk_root is provided, uses tk_root.winfo_rgb.
+    - Otherwise defaults to 'white'.
+    """
+    rgb = _rgb_from_name_or_hex(bgcolor)
+    if rgb is None and tk_root is not None:
+        try:
+            r16, g16, b16 = tk_root.winfo_rgb(bgcolor)  # 0..65535
+            rgb = (r16 // 256, g16 // 256, b16 // 256)
+        except Exception:
+            pass
+    if rgb is None:
+        return "white"
+    r, g, b = rgb
+    # simple luminance heuristic
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b)  # 0..255
+    return "black" if luminance >= 128 else "white"
+
 # ---------------- Simulation ----------------
 class RPSArena(object):
     def __init__(self, root, width, height, units_per_kind, delay_ms,
@@ -77,13 +157,15 @@ class RPSArena(object):
                  fixed_seed=None, num_games=0,
                  log_filename=LOG_FILENAME, ff_enabled=True,
                  background_color=DEFAULT_BACKGROUND, countdown_s=0,
-                 windowless=False, quiet=False):
+                 windowless=False, quiet=False, showstats=False):
         self.root = root
         self.windowless = windowless
         self.quiet = quiet
+        self.showstats = showstats
 
         self.width = int(width)
         self.height = int(height)
+        self.bg_color = background_color
 
         # Dictionaries (allow custom games)
         self.emoji = emoji if emoji is not None else DEFAULT_EMOJI
@@ -105,13 +187,15 @@ class RPSArena(object):
         self.ff_enabled = bool(ff_enabled)
         self.ff_active = False
 
-        # Countdown
-        # Windowless mode ignores countdown entirely.
+        # Countdown (ignored in windowless mode)
         self.countdown_s = 0 if windowless else max(0, int(countdown_s))
         self._in_countdown = False
         self._countdown_remaining = 0
         self._countdown_item = None
         self._countdown_after_id = None
+
+        # Stats overlay
+        self._stats_item = None
 
         # Multi-game controls
         self.num_games = max(0, int(num_games))  # 0 = unlimited
@@ -132,15 +216,21 @@ class RPSArena(object):
 
         # UI only if not windowless
         if not self.windowless:
-            # tk is imported in main when needed; available here at runtime.
+            # Import tkinter here to avoid any Tk cost in windowless mode
+            global tk
+            import tkinter as tk  # type: ignore
             self.root.title(u"RPS Arena")
             self.canvas = tk.Canvas(
                 root, width=self.width, height=self.height,
-                bg=background_color, highlightthickness=0
+                bg=self.bg_color, highlightthickness=0
             )
             self.canvas.pack(fill="both", expand=True)
+
+            # Choose one contrasting text color for both stats & countdown
+            self.ui_text_color = pick_contrast_color(self.bg_color, tk_root=self.root)
         else:
             self.canvas = None
+            self.ui_text_color = "white"  # unused in windowless
 
         self.units = []
         self._restart_after_id = None
@@ -159,7 +249,6 @@ class RPSArena(object):
 
     # ---------------- Logging helpers ----------------
     def _log(self, msg):
-        """Write to logfile and also stdout unless quiet."""
         self.logf.write(msg + "\n")
         self.logf.flush()
         if not self.quiet:
@@ -220,7 +309,8 @@ class RPSArena(object):
         self.ff_active = False
         self._in_countdown = False
         self.delay_ms = self.base_delay_ms
-        self._countdown_item = None  # invalidate old item (deleted with canvas)
+        self._countdown_item = None
+        self._stats_item = None
 
         # Exactly units_per_kind of each kind
         kinds_list = list(self.kinds_order)
@@ -277,6 +367,23 @@ class RPSArena(object):
             vx, vy = math.cos(angle)*speed, math.sin(angle)*speed
             self.units.append(Emoji(k, x, y, vx, vy, item))
 
+    # --- Stats overlay ---
+    def _update_stats_overlay(self):
+        if not self.showstats or self.canvas is None:
+            return
+        elapsed = time.time() - self.game_start_time
+        counts = self._counts_by_kind()
+        parts = [f"{k}:{counts.get(k,0)}" for k in self.kinds_order]
+        text = f"t={elapsed:.1f}s step={self.step_num} " + " ".join(parts)
+        if self._stats_item is None:
+            self._stats_item = self.canvas.create_text(
+                self.width - 5, self.height - 5,
+                text=text, anchor="se",
+                font=("Helvetica", 10), fill=self.ui_text_color
+            )
+        else:
+            self.canvas.itemconfigure(self._stats_item, text=text)
+
     # --- Countdown handling (windowed only) ---
     def _maybe_start_countdown(self):
         if self.canvas is None:
@@ -297,7 +404,7 @@ class RPSArena(object):
                 self.width / 2, self.height / 2,
                 text="",
                 font=("Helvetica", font_size, "bold"),
-                fill="black",
+                fill=self.ui_text_color,
                 anchor="center"
             )
         self.canvas.itemconfigure(self._countdown_item, state="normal")
@@ -507,17 +614,15 @@ class RPSArena(object):
             self._log_counts_if_needed(converted)
             self._maybe_fast_forward()
             self._check_end()
+            self._update_stats_overlay()
         self.root.after(self.delay_ms, self.step)
 
     # --- Windowless runner (headless loop) ---
     def run_windowless(self):
         while True:
-            # Run one game to completion
             self.step_num = 0
             self.game_start_time = time.time()
             self.ff_active = False
-
-            # Tight loop: run as fast as possible (no GUI delays, no postgame delay)
             while True:
                 self.step_num += 1
                 for u in self.units:
@@ -527,28 +632,20 @@ class RPSArena(object):
                 converted = self._handle_collisions_and_conversions()
                 self._log_counts_if_needed(converted)
                 self._maybe_fast_forward()
-
-                # Check end-of-game (windowless path)
                 kinds = set([u.kind for u in self.units])
                 if len(kinds) == 1:
                     self._log_game_end()
                     self.games_played += 1
                     break
-
-            # Stop if we've played the requested number of games
             if self.num_games > 0 and self.games_played >= self.num_games:
                 break
-
-            # Otherwise, advance seed and start next game immediately (no delay, no countdown)
             if self.fixed_seed is not None:
                 self.current_seed += 1
                 random.seed(self.current_seed)
             else:
                 self.current_seed = random.randint(1, 1000000)
                 random.seed(self.current_seed)
-
             self.reset()
-            # (No countdown, no postgame delay in windowless mode)
 
 # ---------------- Utility ----------------
 def unicode_safe(x):
@@ -560,40 +657,38 @@ def unicode_safe(x):
 # ---------------- CLI / Main ----------------
 def parse_args():
     p = argparse.ArgumentParser(description="RPS Arena (closest-choice strategy).")
-    p.add_argument("-s", "--size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
+    p.add_argument("-s","--size", type=int, nargs=2, metavar=("WIDTH","HEIGHT"),
                    help=f"Window size as WIDTH HEIGHT (default {DEFAULT_WIDTH} {DEFAULT_HEIGHT})")
-    p.add_argument("-u", "--units", type=int, default=DEFAULT_UNITS_PER_KIND,
+    p.add_argument("-u","--units", type=int, default=DEFAULT_UNITS_PER_KIND,
                    help=f"Number of units per emoji kind (default {DEFAULT_UNITS_PER_KIND})")
-    p.add_argument("-d", "--delay", type=int, default=DEFAULT_DELAY_MS,
+    p.add_argument("-d","--delay", type=int, default=DEFAULT_DELAY_MS,
                    help=f"Tick delay in ms (0 coerced to 1) (default {DEFAULT_DELAY_MS})")
     p.add_argument("--seed", type=int, default=None,
                    help="Random seed for first game; subsequent games use seed+1, seed+2, ...")
-    p.add_argument("-n", "--num-games", type=int, default=0,
-                   help="Number of games to play (0 = unlimited; default 0). The app closes after the last game.")
+    p.add_argument("-n","--num-games", type=int, default=0,
+                   help="Number of games to play (0=unlimited). Closes after last game.")
     p.add_argument("--noff", action="store_true",
                    help="Disable Fast Forward (no auto-switch to delay=1)")
     p.add_argument("--bg", type=str, default=DEFAULT_BACKGROUND,
                    help=f"Background color (default {DEFAULT_BACKGROUND})")
     p.add_argument("--countdown", type=int, default=0,
-                   help="Seconds to pause after placement and show a centered countdown (windowed only). Default 0 = off.")
+                   help="Seconds to pause after placement (windowed only).")
     p.add_argument("--windowless", action="store_true",
-                   help="Run without opening a Tkinter window. If -n/--num-games not set, defaults to 1.")
-    p.add_argument("-q", "--quiet", action="store_true",
+                   help="Run without Tk window. If -n not set, defaults to 1.")
+    p.add_argument("-q","--quiet", action="store_true",
                    help="Suppress stdout log messages (still written to log file).")
+    p.add_argument("--showstats", action="store_true",
+                   help="Show elapsed time, step, and counts in lower-right corner (windowed only).")
     return p.parse_args()
 
 def main():
     args = parse_args()
-
-    # If windowless and num-games not set, default to 1
     if args.windowless and args.num_games == 0:
         args.num_games = 1
-
     if args.size is not None:
-        width, height = args.size[0], args.size[1]
+        width, height = args.size
     else:
         width, height = DEFAULT_WIDTH, DEFAULT_HEIGHT
-
     delay_ms = args.delay if args.delay > 0 else 1
 
     if args.windowless:
@@ -601,7 +696,7 @@ def main():
     else:
         # Import tkinter only when needed (keeps windowless runs free of Tk)
         global tk
-        import tkinter as tk  # noqa: F401
+        import tkinter as tk  # type: ignore
         root = tk.Tk()
         root.configure(bg=args.bg)
         root.geometry(f"{width}x{height}")
@@ -613,10 +708,10 @@ def main():
              fixed_seed=args.seed, num_games=args.num_games,
              log_filename=LOG_FILENAME, ff_enabled=(not args.noff),
              background_color=args.bg, countdown_s=args.countdown,
-             windowless=args.windowless, quiet=args.quiet)
+             windowless=args.windowless, quiet=args.quiet, showstats=args.showstats)
 
     if not args.windowless:
         root.mainloop()
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
