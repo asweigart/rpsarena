@@ -1,4 +1,5 @@
 import os
+import json
 import random
 import math
 import argparse
@@ -11,7 +12,7 @@ DEFAULT_WIDTH, DEFAULT_HEIGHT = 800, 800
 DEFAULT_UNITS_PER_KIND = 50   # per emoji kind (3 kinds => total 150)
 DEFAULT_DELAY_MS = 30         # tick delay; 0 requested -> coerced to 1
 DEFAULT_BACKGROUND = "white"  # can also be an image path (windowed mode)
-DEFAULT_BLOCKS = 0            # number of rectangular obstacles (0 = none)
+DEFAULT_BLOCKS = "0"          # string: "0" for none, "<int>" for random, or path to JSON file
 
 FONT_SIZE = 24                # emoji font size
 RADIUS = 14                   # approximate collision radius for an emoji at FONT_SIZE
@@ -202,11 +203,17 @@ class RPSArena(object):
         # Stats overlay
         self._stats_item = None
 
-        # Blocks (obstacles) — physics always honors these; drawing only in windowed
-        self.blocks = []             # list of (x1, y1, x2, y2)
+        # Blocks (obstacles)
+        # Internal representation: list of dicts {'x1','y1','x2','y2','color'}
+        self.blocks = []
         self.block_items = []        # canvas ids
-        self.blocks_count = max(0, int(blocks))
-        self.block_color = "white"   # computed later (auto-contrast)
+        self.block_color = "white"   # default for random blocks
+        self.blocks_mode = "none"    # "none" | "random" | "json"
+        self.blocks_count = 0
+        self.blocks_json = None      # canonical blocks from JSON (persistent across resets)
+        self.blocks_json_path = None
+
+        self._parse_blocks_option(blocks)
 
         # Background image state (windowed)
         self._bg_item = None
@@ -252,17 +259,12 @@ class RPSArena(object):
             else:
                 self.ui_text_color = pick_contrast_color(self.bg_source, tk_root=self.root)
 
-            # Block color: auto-contrast as well (use same logic)
+            # Block color default for random blocks: auto-contrast with background
             self.block_color = self.ui_text_color
         else:
             self.canvas = None
-            # In headless mode, default to white (not drawn)
-            self.ui_text_color = "white"
+            self.ui_text_color = "white"  # unused in windowless
             self.block_color = "white"
-
-        # Generate blocks (physics rectangles) once and reuse each game
-        if self.blocks_count > 0:
-            self._generate_blocks()
 
         self.units = []
         self._restart_after_id = None
@@ -278,6 +280,64 @@ class RPSArena(object):
             self.step()
         else:
             self.run_windowless()
+
+    # ---------------- Blocks option parsing ----------------
+    def _parse_blocks_option(self, blocks_opt):
+        """
+        Parse --blocks option which may be:
+          - "0" (or "00"...): no blocks
+          - an integer string: number of random blocks
+          - a path to a JSON file with schema:
+                {"blocks":[{"top":int,"left":int,"width":int,"height":int,"color":"optional"}]}
+        """
+        if blocks_opt is None:
+            self.blocks_mode = "none"
+            self.blocks_count = 0
+            return
+
+        if isinstance(blocks_opt, str) and blocks_opt.strip().isdigit():
+            self.blocks_mode = "random"
+            self.blocks_count = max(0, int(blocks_opt.strip()))
+            return
+
+        # Otherwise treat as file path
+        path = str(blocks_opt)
+        if not os.path.isfile(path):
+            raise ValueError(f"--blocks expects an integer or a JSON file path. Not found: {path}")
+
+        # Load and validate JSON
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Failed to read JSON file for --blocks: {e}")
+
+        if not isinstance(data, dict) or "blocks" not in data or not isinstance(data["blocks"], list):
+            raise ValueError("Invalid JSON: expected an object with key 'blocks' containing a list.")
+
+        canon = []
+        for i, obj in enumerate(data["blocks"]):
+            if not isinstance(obj, dict):
+                raise ValueError(f"Invalid JSON: blocks[{i}] is not an object.")
+            required = ["top", "left", "width", "height"]
+            for k in required:
+                if k not in obj:
+                    raise ValueError(f"Invalid JSON: blocks[{i}] missing required key '{k}'.")
+                if not isinstance(obj[k], int) or obj[k] <= 0:
+                    raise ValueError(f"Invalid JSON: blocks[{i}].{k} must be a positive integer.")
+            color = obj.get("color", None)
+            if color is not None and not isinstance(color, str):
+                raise ValueError(f"Invalid JSON: blocks[{i}].color must be a string if provided.")
+            # Convert to x1,y1,x2,y2
+            x1 = float(obj["left"])
+            y1 = float(obj["top"])
+            x2 = x1 + float(obj["width"])
+            y2 = y1 + float(obj["height"])
+            canon.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "color": color})
+
+        self.blocks_mode = "json"
+        self.blocks_json = canon
+        self.blocks_json_path = path
 
     # ---------------- Background handling (windowed) ----------------
     def _apply_background(self, source):
@@ -345,14 +405,16 @@ class RPSArena(object):
         self._bg_is_image = False
 
     # ---------------- Blocks (obstacles) ----------------
-    def _generate_blocks(self):
-        """Generate self.blocks as rectangles (x1,y1,x2,y2)."""
+    def _generate_blocks_random(self):
+        """Generate random blocks anew (each reset)."""
+        self.blocks = []
+        if self.blocks_mode != "random" or self.blocks_count <= 0:
+            return
         W, H = self.width, self.height
         max_area = 0.20 * (W * H)
-        min_w, max_w = int(0.08 * W), int(0.40 * W)  # choose generous ranges; clamp by area
+        min_w, max_w = int(0.08 * W), int(0.40 * W)
         min_h, max_h = int(0.08 * H), int(0.40 * H)
 
-        self.blocks = []
         attempts = 0
         target = self.blocks_count
         while len(self.blocks) < target and attempts < target * 30:
@@ -361,7 +423,7 @@ class RPSArena(object):
             h = random.randint(min_h, max_h)
             # Enforce per-block area cap
             if w * h > max_area:
-                # scale h down to fit area
+                # shrink h to fit area (keep >= min_h if possible)
                 h = max(int(max_area / max(w, 1)), min_h)
                 if h < min_h:
                     continue
@@ -369,11 +431,29 @@ class RPSArena(object):
             y1 = random.randint(RADIUS + 2, max(RADIUS + 2, H - h - RADIUS - 2))
             x2 = x1 + w
             y2 = y1 + h
-            # Rectangle normalized
             if x2 - x1 >= 4 and y2 - y1 >= 4:
-                self.blocks.append((float(x1), float(y1), float(x2), float(y2)))
+                self.blocks.append({
+                    "x1": float(x1), "y1": float(y1),
+                    "x2": float(x2), "y2": float(y2),
+                    "color": self.block_color
+                })
 
-        # If windowed, pre-draw on next reset; here we only compute geometry
+    def _apply_blocks_from_json(self):
+        """Copy pre-validated JSON blocks (same each reset)."""
+        self.blocks = []
+        if self.blocks_mode != "json" or not self.blocks_json:
+            return
+        # Clone and apply per-block color defaults
+        for b in self.blocks_json:
+            color = b.get("color")
+            if color is None:
+                # Default to auto-contrast color against bg
+                color = self.ui_text_color if not self.windowless else "white"
+            self.blocks.append({
+                "x1": float(b["x1"]), "y1": float(b["y1"]),
+                "x2": float(b["x2"]), "y2": float(b["y2"]),
+                "color": color
+            })
 
     def _draw_blocks(self):
         """Draw blocks on the canvas (windowed only)."""
@@ -387,26 +467,30 @@ class RPSArena(object):
                 pass
         self.block_items = []
 
-        for (x1, y1, x2, y2) in self.blocks:
-            cid = self.canvas.create_rectangle(x1, y1, x2, y2, fill=self.block_color, outline=self.block_color)
+        for b in self.blocks:
+            x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
+            color = b.get("color", self.ui_text_color)
+            cid = self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline=color)
             # Keep blocks above background but below emojis
-            self.canvas.tag_lower(cid)  # just in case
+            self.canvas.tag_lower(cid)  # send low in stack
             if self._bg_item is not None:
                 self.canvas.tag_raise(cid, self._bg_item)
             self.block_items.append(cid)
 
     def _point_in_any_block(self, x, y, margin=0.0):
         """Return True if point (x,y) is inside any block expanded by margin."""
-        for (x1, y1, x2, y2) in self.blocks:
+        for b in self.blocks:
+            x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
             if (x1 - margin) <= x <= (x2 + margin) and (y1 - margin) <= y <= (y2 + margin):
                 return True
         return False
 
     def _colliding_block(self, x, y, margin=0.0):
-        """Return the first block (x1,y1,x2,y2) containing point (x,y) with margin, or None."""
-        for (x1, y1, x2, y2) in self.blocks:
+        """Return the first block dict containing point (x,y) with margin, or None."""
+        for b in self.blocks:
+            x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
             if (x1 - margin) <= x <= (x2 + margin) and (y1 - margin) <= y <= (y2 + margin):
-                return (x1, y1, x2, y2)
+                return b
         return None
 
     # ---------------- Logging helpers ----------------
@@ -418,6 +502,9 @@ class RPSArena(object):
 
     def _write_log_header(self):
         now = datetime.datetime.now().isoformat(" ")
+        blocks_desc = self.blocks_mode if self.blocks_mode != "json" else f"json:{self.blocks_json_path}"
+        if self.blocks_mode == "random":
+            blocks_desc += f"({self.blocks_count})"
         settings = ("start={0} | size={1}x{2} | units_per_kind={3} | total_units={4} | "
                     "delay_ms={5} | seed={6} | kinds={7} | fast_forward={8} | num_games={9} | blocks={10}"
                     .format(now, self.width, self.height,
@@ -426,7 +513,7 @@ class RPSArena(object):
                             self.current_seed if self.fixed_seed is not None else "random",
                             ",".join(self.kinds_order),
                             "on" if self.ff_enabled else "off",
-                            self.num_games, self.blocks_count))
+                            self.num_games, blocks_desc))
         self._log(settings)
         header = ["STEP"]
         for k in self.kinds_order:
@@ -467,9 +554,17 @@ class RPSArena(object):
             self.canvas.delete("all")
             # Re-apply background after clearing canvas
             self._apply_background(self.bg_source)
-            # Draw blocks below emojis
-            if self.blocks:
-                self._draw_blocks()
+
+        # Blocks: regenerate for random mode each reset; reuse JSON blocks as-is
+        if self.blocks_mode == "random":
+            self._generate_blocks_random()
+        elif self.blocks_mode == "json":
+            self._apply_blocks_from_json()
+        else:
+            self.blocks = []
+
+        if self.canvas is not None and self.blocks:
+            self._draw_blocks()
 
         self.units = []
         self.step_num = 0
@@ -487,7 +582,7 @@ class RPSArena(object):
             kinds.extend([k] * self.units_per_kind)
         random.shuffle(kinds)
 
-        # Place with minimum separation (best-effort) and outside blocks (with margin=RADIUS)
+        # Place with minimum separation (best-effort) and outside blocks (margin=RADIUS)
         placed = 0
         attempts = 0
         max_attempts = len(kinds) * 500
@@ -691,36 +786,32 @@ class RPSArena(object):
             bounced = True
 
         # Blocks collision — prevent center from entering any expanded rectangle
-        # Iterate a couple times in case of corner cases
         for _ in range(2):
-            block = self._colliding_block(nx, ny, margin=RADIUS)
-            if block is None:
+            b = self._colliding_block(nx, ny, margin=RADIUS)
+            if b is None:
                 break
-            x1, y1, x2, y2 = block
-            # Distances to expanded sides
+            x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
             left = x1 - RADIUS
             right = x2 + RADIUS
             top = y1 - RADIUS
             bottom = y2 + RADIUS
 
-            # Compute penetration from each side candidate relative to previous position
             dx_left = abs(nx - left)
             dx_right = abs(nx - right)
             dy_top = abs(ny - top)
             dy_bottom = abs(ny - bottom)
 
-            # Choose smallest correction axis
             m = min(dx_left, dx_right, dy_top, dy_bottom)
             if m == dx_left:
                 nx = left
-                u.vx = -abs(u.vx) * WALL_BOUNCE  # bounce horizontally
+                u.vx = -abs(u.vx) * WALL_BOUNCE
             elif m == dx_right:
                 nx = right
                 u.vx = abs(u.vx) * WALL_BOUNCE
             elif m == dy_top:
                 ny = top
-                u.vy = -abs(u.vy) * WALL_BOUNCE  # bounce vertically
-            else:  # dy_bottom
+                u.vy = -abs(u.vy) * WALL_BOUNCE
+            else:
                 ny = bottom
                 u.vy = abs(u.vy) * WALL_BOUNCE
             bounced = True
@@ -889,8 +980,8 @@ def parse_args():
                    help="Suppress stdout log messages (still written to log file).")
     p.add_argument("--showstats", action="store_true",
                    help="Show elapsed time, step, and counts in lower-right corner (windowed only).")
-    p.add_argument("--blocks", type=int, default=DEFAULT_BLOCKS,
-                   help=f"Number of rectangular obstacle blocks to add (default {DEFAULT_BLOCKS}).")
+    p.add_argument("--blocks", type=str, default=DEFAULT_BLOCKS,
+                   help="Number of random blocks (e.g., '5') OR path to JSON file describing blocks.")
     return p.parse_args()
 
 def main():
