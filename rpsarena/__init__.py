@@ -10,7 +10,8 @@ import sys
 DEFAULT_WIDTH, DEFAULT_HEIGHT = 800, 800
 DEFAULT_UNITS_PER_KIND = 50   # per emoji kind (3 kinds => total 150)
 DEFAULT_DELAY_MS = 30         # tick delay; 0 requested -> coerced to 1
-DEFAULT_BACKGROUND = "white"  # can now also be an image filename (windowed mode)
+DEFAULT_BACKGROUND = "white"  # can also be an image path (windowed mode)
+DEFAULT_BLOCKS = 0            # number of rectangular obstacles (0 = none)
 
 FONT_SIZE = 24                # emoji font size
 RADIUS = 14                   # approximate collision radius for an emoji at FONT_SIZE
@@ -161,7 +162,7 @@ class RPSArena(object):
                  fixed_seed=None, num_games=0,
                  log_filename=LOG_FILENAME, ff_enabled=True,
                  background_color=DEFAULT_BACKGROUND, countdown_s=0,
-                 windowless=False, quiet=False, showstats=False):
+                 windowless=False, quiet=False, showstats=False, blocks=DEFAULT_BLOCKS):
         self.root = root
         self.windowless = windowless
         self.quiet = quiet
@@ -169,7 +170,7 @@ class RPSArena(object):
 
         self.width = int(width)
         self.height = int(height)
-        self.bg_source = background_color  # color name/hex OR image path
+        self.bg_source = background_color  # color or image path
 
         # Dictionaries (allow custom games)
         self.emoji = emoji if emoji is not None else DEFAULT_EMOJI
@@ -201,11 +202,17 @@ class RPSArena(object):
         # Stats overlay
         self._stats_item = None
 
+        # Blocks (obstacles) — physics always honors these; drawing only in windowed
+        self.blocks = []             # list of (x1, y1, x2, y2)
+        self.block_items = []        # canvas ids
+        self.blocks_count = max(0, int(blocks))
+        self.block_color = "white"   # computed later (auto-contrast)
+
         # Background image state (windowed)
         self._bg_item = None
         self._bg_photo = None
         self._bg_is_image = False
-        self._bg_contrast_color = "white"  # computed later if image
+        self._bg_contrast_color = "white"  # for images, computed from luminance
 
         # Multi-game controls
         self.num_games = max(0, int(num_games))  # 0 = unlimited
@@ -244,9 +251,18 @@ class RPSArena(object):
                 self.ui_text_color = self._bg_contrast_color
             else:
                 self.ui_text_color = pick_contrast_color(self.bg_source, tk_root=self.root)
+
+            # Block color: auto-contrast as well (use same logic)
+            self.block_color = self.ui_text_color
         else:
             self.canvas = None
-            self.ui_text_color = "white"  # unused in windowless
+            # In headless mode, default to white (not drawn)
+            self.ui_text_color = "white"
+            self.block_color = "white"
+
+        # Generate blocks (physics rectangles) once and reuse each game
+        if self.blocks_count > 0:
+            self._generate_blocks()
 
         self.units = []
         self._restart_after_id = None
@@ -307,7 +323,6 @@ class RPSArena(object):
 
             # Fallback: Tk PhotoImage (may not resize)
             try:
-                # We need tk imported; it is available in windowed mode
                 self._bg_photo = tk.PhotoImage(file=source)  # type: ignore
                 self._bg_item = self.canvas.create_image(0, 0, image=self._bg_photo, anchor="nw")
                 self.canvas.lower(self._bg_item)
@@ -329,6 +344,71 @@ class RPSArena(object):
             self._log(f"warning: invalid background '{source}', defaulting to white.")
         self._bg_is_image = False
 
+    # ---------------- Blocks (obstacles) ----------------
+    def _generate_blocks(self):
+        """Generate self.blocks as rectangles (x1,y1,x2,y2)."""
+        W, H = self.width, self.height
+        max_area = 0.20 * (W * H)
+        min_w, max_w = int(0.08 * W), int(0.40 * W)  # choose generous ranges; clamp by area
+        min_h, max_h = int(0.08 * H), int(0.40 * H)
+
+        self.blocks = []
+        attempts = 0
+        target = self.blocks_count
+        while len(self.blocks) < target and attempts < target * 30:
+            attempts += 1
+            w = random.randint(min_w, max_w)
+            h = random.randint(min_h, max_h)
+            # Enforce per-block area cap
+            if w * h > max_area:
+                # scale h down to fit area
+                h = max(int(max_area / max(w, 1)), min_h)
+                if h < min_h:
+                    continue
+            x1 = random.randint(RADIUS + 2, max(RADIUS + 2, W - w - RADIUS - 2))
+            y1 = random.randint(RADIUS + 2, max(RADIUS + 2, H - h - RADIUS - 2))
+            x2 = x1 + w
+            y2 = y1 + h
+            # Rectangle normalized
+            if x2 - x1 >= 4 and y2 - y1 >= 4:
+                self.blocks.append((float(x1), float(y1), float(x2), float(y2)))
+
+        # If windowed, pre-draw on next reset; here we only compute geometry
+
+    def _draw_blocks(self):
+        """Draw blocks on the canvas (windowed only)."""
+        if self.canvas is None:
+            return
+        # Clear existing
+        for cid in self.block_items:
+            try:
+                self.canvas.delete(cid)
+            except Exception:
+                pass
+        self.block_items = []
+
+        for (x1, y1, x2, y2) in self.blocks:
+            cid = self.canvas.create_rectangle(x1, y1, x2, y2, fill=self.block_color, outline=self.block_color)
+            # Keep blocks above background but below emojis
+            self.canvas.tag_lower(cid)  # just in case
+            if self._bg_item is not None:
+                self.canvas.tag_raise(cid, self._bg_item)
+            self.block_items.append(cid)
+
+    def _point_in_any_block(self, x, y, margin=0.0):
+        """Return True if point (x,y) is inside any block expanded by margin."""
+        for (x1, y1, x2, y2) in self.blocks:
+            if (x1 - margin) <= x <= (x2 + margin) and (y1 - margin) <= y <= (y2 + margin):
+                return True
+        return False
+
+    def _colliding_block(self, x, y, margin=0.0):
+        """Return the first block (x1,y1,x2,y2) containing point (x,y) with margin, or None."""
+        for (x1, y1, x2, y2) in self.blocks:
+            if (x1 - margin) <= x <= (x2 + margin) and (y1 - margin) <= y <= (y2 + margin):
+                return (x1, y1, x2, y2)
+        return None
+
     # ---------------- Logging helpers ----------------
     def _log(self, msg):
         self.logf.write(msg + "\n")
@@ -339,14 +419,14 @@ class RPSArena(object):
     def _write_log_header(self):
         now = datetime.datetime.now().isoformat(" ")
         settings = ("start={0} | size={1}x{2} | units_per_kind={3} | total_units={4} | "
-                    "delay_ms={5} | seed={6} | kinds={7} | fast_forward={8} | num_games={9}"
+                    "delay_ms={5} | seed={6} | kinds={7} | fast_forward={8} | num_games={9} | blocks={10}"
                     .format(now, self.width, self.height,
                             self.units_per_kind, self.num_units,
                             self.delay_ms,
                             self.current_seed if self.fixed_seed is not None else "random",
                             ",".join(self.kinds_order),
                             "on" if self.ff_enabled else "off",
-                            self.num_games))
+                            self.num_games, self.blocks_count))
         self._log(settings)
         header = ["STEP"]
         for k in self.kinds_order:
@@ -387,6 +467,9 @@ class RPSArena(object):
             self.canvas.delete("all")
             # Re-apply background after clearing canvas
             self._apply_background(self.bg_source)
+            # Draw blocks below emojis
+            if self.blocks:
+                self._draw_blocks()
 
         self.units = []
         self.step_num = 0
@@ -404,14 +487,17 @@ class RPSArena(object):
             kinds.extend([k] * self.units_per_kind)
         random.shuffle(kinds)
 
-        # Place with minimum separation (best-effort)
+        # Place with minimum separation (best-effort) and outside blocks (with margin=RADIUS)
         placed = 0
         attempts = 0
-        max_attempts = len(kinds) * 250
+        max_attempts = len(kinds) * 500
         while placed < len(kinds) and attempts < max_attempts:
             attempts += 1
             x = random.uniform(RADIUS + 2, self.width - RADIUS - 2)
             y = random.uniform(RADIUS + 2, self.height - RADIUS - 2)
+
+            if self._point_in_any_block(x, y, margin=RADIUS):
+                continue
 
             too_close = False
             for u in self.units:
@@ -436,10 +522,15 @@ class RPSArena(object):
             self.units.append(Emoji(kind, x, y, vx, vy, item))
             placed += 1
 
-        # If we couldn't place all with min-sep, place remaining without constraint
+        # If we couldn't place all with constraints, place remaining without min-sep but still outside blocks
         for k in kinds[placed:]:
-            x = random.uniform(RADIUS + 2, self.width - RADIUS - 2)
-            y = random.uniform(RADIUS + 2, self.height - RADIUS - 2)
+            tries = 0
+            while True and tries < 2000:
+                tries += 1
+                x = random.uniform(RADIUS + 2, self.width - RADIUS - 2)
+                y = random.uniform(RADIUS + 2, self.height - RADIUS - 2)
+                if not self._point_in_any_block(x, y, margin=RADIUS):
+                    break
             item = None
             if self.canvas is not None:
                 item = self.canvas.create_text(
@@ -549,7 +640,6 @@ class RPSArena(object):
             fx += dx * ATTRACTION
             fy += dy * ATTRACTION
         elif closest_pred is not None:
-            dx, dy = normalize(me.x - closest_pred.x, me.y - me.y)
             dx, dy = normalize(me.x - closest_pred.x, me.y - closest_pred.y)
             fx += dx * REPULSION
             fy += dy * REPULSION
@@ -577,9 +667,11 @@ class RPSArena(object):
         u.vx, u.vy = cap_speed(u.vx, u.vy, BASE_SPEED)
 
     def _move(self, u):
+        # Proposed movement
         nx = u.x + u.vx
         ny = u.y + u.vy
 
+        # Walls
         bounced = False
         if nx < RADIUS:
             nx = RADIUS + (RADIUS - nx)
@@ -596,6 +688,41 @@ class RPSArena(object):
         elif ny > self.height - RADIUS:
             ny = (self.height - RADIUS) - (ny - (self.height - RADIUS))
             u.vy = -u.vy * WALL_BOUNCE
+            bounced = True
+
+        # Blocks collision — prevent center from entering any expanded rectangle
+        # Iterate a couple times in case of corner cases
+        for _ in range(2):
+            block = self._colliding_block(nx, ny, margin=RADIUS)
+            if block is None:
+                break
+            x1, y1, x2, y2 = block
+            # Distances to expanded sides
+            left = x1 - RADIUS
+            right = x2 + RADIUS
+            top = y1 - RADIUS
+            bottom = y2 + RADIUS
+
+            # Compute penetration from each side candidate relative to previous position
+            dx_left = abs(nx - left)
+            dx_right = abs(nx - right)
+            dy_top = abs(ny - top)
+            dy_bottom = abs(ny - bottom)
+
+            # Choose smallest correction axis
+            m = min(dx_left, dx_right, dy_top, dy_bottom)
+            if m == dx_left:
+                nx = left
+                u.vx = -abs(u.vx) * WALL_BOUNCE  # bounce horizontally
+            elif m == dx_right:
+                nx = right
+                u.vx = abs(u.vx) * WALL_BOUNCE
+            elif m == dy_top:
+                ny = top
+                u.vy = -abs(u.vy) * WALL_BOUNCE  # bounce vertically
+            else:  # dy_bottom
+                ny = bottom
+                u.vy = abs(u.vy) * WALL_BOUNCE
             bounced = True
 
         if bounced:
@@ -762,6 +889,8 @@ def parse_args():
                    help="Suppress stdout log messages (still written to log file).")
     p.add_argument("--showstats", action="store_true",
                    help="Show elapsed time, step, and counts in lower-right corner (windowed only).")
+    p.add_argument("--blocks", type=int, default=DEFAULT_BLOCKS,
+                   help=f"Number of rectangular obstacle blocks to add (default {DEFAULT_BLOCKS}).")
     return p.parse_args()
 
 def main():
@@ -791,7 +920,8 @@ def main():
              fixed_seed=args.seed, num_games=args.num_games,
              log_filename=LOG_FILENAME, ff_enabled=(not args.noff),
              background_color=args.bg, countdown_s=args.countdown,
-             windowless=args.windowless, quiet=args.quiet, showstats=args.showstats)
+             windowless=args.windowless, quiet=args.quiet,
+             showstats=args.showstats, blocks=args.blocks)
 
     if not args.windowless:
         root.mainloop()
