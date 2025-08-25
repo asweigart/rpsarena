@@ -7,22 +7,22 @@ import tkinter as tk
 
 # ---------------- Configuration defaults ----------------
 DEFAULT_WIDTH, DEFAULT_HEIGHT = 800, 800
-DEFAULT_NUM_EMOJIS = 150
-DEFAULT_DELAY_MS = 30       # tick delay; 0 requested -> coerced to 1
+DEFAULT_UNITS_PER_KIND = 50   # per emoji kind (3 kinds => total 150)
+DEFAULT_DELAY_MS = 30         # tick delay; 0 requested -> coerced to 1
 DEFAULT_BACKGROUND = "white"
 
-FONT_SIZE = 24              # emoji font size
-RADIUS = 14                 # approximate collision radius for an emoji at FONT_SIZE
-MIN_SEP = RADIUS * 2 + 6    # minimum separation for initial placement
+FONT_SIZE = 24                # emoji font size
+RADIUS = 14                   # approximate collision radius for an emoji at FONT_SIZE
+MIN_SEP = RADIUS * 2 + 6      # minimum separation for initial placement
 
-BASE_SPEED = 2.2            # movement cap per tick
-ATTRACTION = 1.6            # toward prey
-REPULSION = 1.8             # away from predators
-ALLY_REPEL = 1.3            # mild repel from allies to avoid clumping
-WALL_BOUNCE = 0.9           # bounce damping
-JITTER = 0.25               # tiny noise to prevent stalemates
+BASE_SPEED = 2.2              # movement cap per tick
+ATTRACTION = 1.6              # toward prey
+REPULSION = 1.8               # away from predators
+ALLY_REPEL = 1.3              # mild repel from allies to avoid clumping
+WALL_BOUNCE = 0.9             # bounce damping
+JITTER = 0.25                 # tiny noise to prevent stalemates
 
-POSTGAME_DELAY_MS = 5000     # 5 second delay before starting a new arena
+POSTGAME_DELAY_MS = 5000      # pause after each game, even the last one
 
 DEFAULT_EMOJI = {
     "rock": u"🪨",
@@ -72,7 +72,7 @@ def cap_speed(vx, vy, cap):
 
 # ---------------- Simulation ----------------
 class RPSArena(object):
-    def __init__(self, root, width, height, num_units, delay_ms,
+    def __init__(self, root, width, height, units_per_kind, delay_ms,
                  emoji=None, beats=None, loses_to=None,
                  fixed_seed=None, num_games=0,
                  log_filename=LOG_FILENAME, ff_enabled=True,
@@ -80,7 +80,16 @@ class RPSArena(object):
         self.root = root
         self.width = int(width)
         self.height = int(height)
-        self.num_units = max(3, int(num_units))
+
+        # Dictionaries (allow custom games)
+        self.emoji = emoji if emoji is not None else DEFAULT_EMOJI
+        self.beats = beats if beats is not None else DEFAULT_BEATS
+        self.loses_to = loses_to if loses_to is not None else DEFAULT_LOSES_TO
+        self.kinds_order = sorted(list(self.emoji.keys()))
+
+        # Per-kind units (new behavior)
+        self.units_per_kind = max(1, int(units_per_kind))
+        self.num_units = self.units_per_kind * len(self.kinds_order)
 
         delay_ms = int(delay_ms)
         if delay_ms <= 0:
@@ -98,14 +107,6 @@ class RPSArena(object):
         self._countdown_remaining = 0
         self._countdown_item = None
         self._countdown_after_id = None
-
-        # Dictionaries (allow custom games)
-        self.emoji = emoji if emoji is not None else DEFAULT_EMOJI
-        self.beats = beats if beats is not None else DEFAULT_BEATS
-        self.loses_to = loses_to if loses_to is not None else DEFAULT_LOSES_TO
-
-        # Stable order for logging
-        self.kinds_order = sorted(list(self.emoji.keys()))
 
         # Multi-game controls
         self.num_games = max(0, int(num_games))  # 0 = unlimited
@@ -144,8 +145,11 @@ class RPSArena(object):
 
     def _write_log_header(self):
         now = datetime.datetime.now().isoformat(" ")
-        settings = ("start={0} | size={1}x{2} | units={3} | delay_ms={4} | seed={5} | kinds={6} | fast_forward={7} | num_games={8}"
-                    .format(now, self.width, self.height, self.num_units, self.delay_ms,
+        settings = ("start={0} | size={1}x{2} | units_per_kind={3} | total_units={4} | "
+                    "delay_ms={5} | seed={6} | kinds={7} | fast_forward={8} | num_games={9}"
+                    .format(now, self.width, self.height,
+                            self.units_per_kind, self.num_units,
+                            self.delay_ms,
                             self.current_seed if self.fixed_seed is not None else "random",
                             ",".join(self.kinds_order),
                             "on" if self.ff_enabled else "off",
@@ -197,19 +201,18 @@ class RPSArena(object):
         self.delay_ms = self.base_delay_ms
         self._countdown_item = None  # invalidate old item (deleted with canvas)
 
+        # Exactly units_per_kind of each kind
         kinds_list = list(self.kinds_order)
         kinds = []
-        n_each = self.num_units // len(kinds_list)
         for k in kinds_list:
-            kinds.extend([k] * n_each)
-        for _ in range(self.num_units - len(kinds)):
-            kinds.append(random.choice(kinds_list))
+            kinds.extend([k] * self.units_per_kind)
         random.shuffle(kinds)
 
+        # Place with minimum separation (best-effort)
         placed = 0
         attempts = 0
-        max_attempts = self.num_units * 250
-        while placed < self.num_units and attempts < max_attempts:
+        max_attempts = len(kinds) * 250
+        while placed < len(kinds) and attempts < max_attempts:
             attempts += 1
             x = random.uniform(RADIUS + 2, self.width - RADIUS - 2)
             y = random.uniform(RADIUS + 2, self.height - RADIUS - 2)
@@ -235,6 +238,7 @@ class RPSArena(object):
             self.units.append(Emoji(kind, x, y, vx, vy, item))
             placed += 1
 
+        # If we couldn't place all with min-sep, place remaining without constraint
         for k in kinds[placed:]:
             x = random.uniform(RADIUS + 2, self.width - RADIUS - 2)
             y = random.uniform(RADIUS + 2, self.height - RADIUS - 2)
@@ -425,16 +429,15 @@ class RPSArena(object):
             self._log_game_end()
             self.games_played += 1
 
-            # If we've reached the requested number of games, close after delay
+            # If we've reached the requested number of games, close after postgame delay
             if self.num_games > 0 and self.games_played >= self.num_games:
                 self._restart_after_id = self.root.after(POSTGAME_DELAY_MS, self.root.destroy)
                 return True
 
-            # Otherwise schedule reset into next game after delay
+            # Otherwise schedule reset into next game after the postgame delay
             self._restart_after_id = self.root.after(POSTGAME_DELAY_MS, self._do_reset_next_game)
             return True
         return False
-
 
     def _do_reset_next_game(self):
         self._restart_after_id = None
@@ -482,8 +485,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="RPS Arena (closest-choice strategy).")
     p.add_argument("-s", "--size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
                    help=f"Window size as WIDTH HEIGHT (default {DEFAULT_WIDTH} {DEFAULT_HEIGHT})")
-    p.add_argument("-u", "--units", type=int, default=DEFAULT_NUM_EMOJIS,
-                   help=f"Total unit count (default {DEFAULT_NUM_EMOJIS})")
+    p.add_argument("-u", "--units", type=int, default=DEFAULT_UNITS_PER_KIND,
+                   help=f"Number of units per emoji kind (default {DEFAULT_UNITS_PER_KIND})")
     p.add_argument("-d", "--delay", type=int, default=DEFAULT_DELAY_MS,
                    help=f"Tick delay in ms (0 coerced to 1) (default {DEFAULT_DELAY_MS})")
     p.add_argument("--seed", type=int, default=None,
