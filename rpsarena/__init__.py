@@ -931,7 +931,7 @@ def unicode_safe(x):
 
 # ---------------- CLI / Main ----------------
 def parse_args():
-    p = argparse.ArgumentParser(description="RPS Arena (closest-choice strategy).")
+    p = argparse.ArgumentParser(description="RPS Arena")
     p.add_argument("-s","--size", type=int, nargs=2, metavar=("WIDTH","HEIGHT"),
                    help=f"Window size as WIDTH HEIGHT (default {DEFAULT_WIDTH} {DEFAULT_HEIGHT})")
     p.add_argument("-u","--units", type=int, default=DEFAULT_UNITS_PER_KIND,

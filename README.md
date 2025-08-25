@@ -2,16 +2,14 @@
 
 A simulation of Rock Paper Scissors units chasing each other in a GUI window. Highly configurable.
 
-Units roam a white arena using a **closest-choice** strategy:
-- Each unit **chases** the nearest unit it can defeat, **or** **flees** the nearest unit that can defeat it — whichever is closer.
-- On contact, the loser converts to the winner’s kind.
+- Each unit chases the nearest unit it can defeat, or flees the nearest unit that can defeat it — whichever is closer.
+- On contact, the loser converts to the winner's kind.
 - When only one kind remains, the game ends; either exits (if a seed was specified) or restarts with a fresh random seed.
 
 ## Features
-- **Fast Forward:** When only two kinds remain and one beats the other (eventual victory), delay auto-switches to **1 ms** to speed up the finish. Enabled by default; disable with `--noff`.
-- **Fixed-size window:** no user resizing (preventing accidental scale changes).
+- **Fast Forward:** When only two kinds remain and one beats the other (eventual victory), delay auto-switches to 1 ms to speed up the finish. Enabled by default; disable with `--noff`.
 - **Deterministic runs:** `--seed` fixes the RNG seed (plays a single game and exits).
-- **Live logging:** `rps_arena_log.txt` records settings, a header row, conversion snapshots, and an end-of-game summary including **elapsed time** and **total step count**.
+- **Logging:** `rps_arena_log.txt` records settings, a header row, conversion snapshots, and an end-of-game summary including elapsed time and total simulation step count.
 
 ## Requirements
 - Python **3.2+**
@@ -20,33 +18,73 @@ Units roam a white arena using a **closest-choice** strategy:
 ## Usage
 
 ```bash
-python rps_arena.py -s 1200 800 -u 240 -d 16
-python rps_arena.py --seed 12345 -d 0      # delay 0 is coerced to 1 ms
-python rps_arena.py --noff                 # disable Fast Forward
+usage: __main__.py [-h] [-s WIDTH HEIGHT] [-u UNITS] [-d DELAY] [--seed SEED] [-n NUM_GAMES] [--no-ff] [--bg BG]
+                   [--countdown COUNTDOWN] [--windowless] [-q] [--showstats] [--blocks BLOCKS] [--no-log]
+                   [--logfile LOGFILE]
+
+RPS Arena
+
+options:
+  -h, --help            show this help message and exit
+  -s, --size WIDTH HEIGHT
+                        Window size as WIDTH HEIGHT (default 800 800)
+  -u, --units UNITS     Number of units per emoji kind (default 50)
+  -d, --delay DELAY     Tick delay in ms (0 coerced to 1) (default 30)
+  --seed SEED           Random seed for first game; subsequent games use seed+1, seed+2, ...
+  -n, --num-games NUM_GAMES
+                        Number of games to play (0=unlimited). Closes after last game.
+  --no-ff               Disable Fast Forward (no auto-switch to delay=1)
+  --bg BG               Background color or image filename (windowed). Colors: name or #RRGGBB.
+  --countdown COUNTDOWN
+                        Seconds to pause after placement (windowed only).
+  --windowless          Run without Tk window. If -n not set, defaults to 1.
+  -q, --quiet           Suppress stdout log messages (file logging unaffected unless --no-log).
+  --showstats           Show elapsed time, step, and counts in lower-right corner (windowed only).
+  --blocks BLOCKS       Number of random blocks (e.g., '5') OR path to JSON file describing blocks.
+  --no-log              Disable logging to file (stdout still used unless --quiet).
+  --logfile LOGFILE     Log file name (default rps_arena_log.txt)
 ````
 
 ### Command-line Options
 
-* `-s, --size WIDTH HEIGHT` – window size (default `1000 700`)
-* `-u, --units N` – total units (default `150`)
-* `-d, --delay MS` – per-tick delay in milliseconds; **0 → coerced to 1** (default `30`)
-* `--seed SEED` – run exactly one deterministic game with the given seed
-* `--noff` – disable Fast Forward auto-speed-up
+* `-u N`, `--units N`
+  Number of units per emoji kind (default `50`).
+  With 3 kinds, total units = `N * 3`.
 
-## Log File Format (`rps_arena_log.txt`)
+* `-d MS`, `--delay MS`
+  Tick delay in milliseconds (default `30`). Minimum is 1.
 
-1. **Line 1:** Start timestamp and settings (size, units, delay, seed, kinds, fast\_forward on/off)
-2. **Line 2:** CSV header – `step,<emoji1>,<emoji2>,<emoji3>`
-3. **Subsequent lines:** `step,count1,count2,count3` – appended **only when a conversion happens**
-4. **Final line:** `game_end at <timestamp>; elapsed=<seconds>s; steps=<N>`
+* `--seed INT`
+  Use a fixed random seed. If multiple games are run, the first game uses this seed, then increments sequentially (`seed+1`, `seed+2`, ...).
 
-Example snippet:
+* `-n N`, `--num-games N`
+  Number of games to run. `0` = unlimited (default).
+  If nonzero, the app closes automatically after the last game (after the postgame delay in windowed mode).
+
+* `--no-ff`
+  Disable fast-forward. Normally, if only two kinds remain and one beats the other, the simulation speeds up by setting delay to 1ms.
+
+
+## Logging
+
+* `--logfile FILE`
+  Log file name (default `rps_arena_log.txt`).
+
+* `--no-log`
+  Disable writing to the log file (stdout logs still shown unless `--quiet`).
+
+* `-q`, `--quiet`
+  Suppress stdout logging.
+  Combine with `--no-log` for a fully silent run.
+
+Example log file:
 
 ```
 start=2025-08-23 12:34:56 | size=1000x700 | units=150 | delay_ms=30 | seed=987654 | kinds=paper,rock,scissors | fast_forward=on
 step,📄,🪨,✂️
 42,60,55,35
 57,65,50,35
+--snip--
 game_end at 2025-08-23 12:35:49; elapsed=53.123s; steps=172
 ```
 
@@ -63,8 +101,38 @@ RPSArena(root, width, height, units, delay_ms,
          emoji=custom_emoji, beats=custom_beats, loses_to=custom_loses)
 ```
 
-> This build uses **single-prey/single-predator** rules per kind. If you’d like multi-prey or multi-predator rules (e.g., a kind beats multiple others), ask and we’ll provide a drop-in patch.
 
-## License
 
-MIT
+
+### Blocks / Obstacles
+
+* `--blocks N`
+  Place `N` random rectangular blocks that units cannot enter. Blocks are regenerated on each reset.
+  Each block is ≤ 20% of arena area. Overlap is allowed.
+
+* `--blocks FILE.json`
+  Use fixed blocks from JSON file.
+  Format:
+
+  ```json
+  {
+    "blocks": [
+      {"top": 0, "left": 0, "width": 100, "height": 100, "color": "green"},
+      {"top": 200, "left": 150, "width": 150, "height": 80}
+    ]
+  }
+  ```
+
+  * `color` is optional (auto-contrasts with background if missing).
+  * JSON blocks are reused on each reset.
+
+
+### Windowless Mode
+
+* `--windowless`
+  Run without Tkinter window.
+
+  * Defaults to 1 game unless `-n` is specified.
+  * Ignores countdowns and postgame delays.
+  * No rendering, runs as fast as possible.
+  * Logs are printed to stdout unless `--quiet` is set, and optionally to file unless `--no-log` is set.
