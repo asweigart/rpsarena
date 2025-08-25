@@ -11,8 +11,9 @@ import sys
 DEFAULT_WIDTH, DEFAULT_HEIGHT = 800, 800
 DEFAULT_UNITS_PER_KIND = 50   # per emoji kind (3 kinds => total 150)
 DEFAULT_DELAY_MS = 30         # tick delay; 0 requested -> coerced to 1
-DEFAULT_BACKGROUND = "white"  # can also be an image path (windowed mode)
-DEFAULT_BLOCKS = "0"          # string: "0" for none, "<int>" for random, or path to JSON file
+DEFAULT_BACKGROUND = "white"  # color or image filename (windowed mode)
+DEFAULT_BLOCKS = "0"          # "0" none, "<int>" random, or path to JSON
+DEFAULT_LOGFILE = "rps_arena_log.txt"
 
 FONT_SIZE = 24                # emoji font size
 RADIUS = 14                   # approximate collision radius for an emoji at FONT_SIZE
@@ -32,18 +33,8 @@ DEFAULT_EMOJI = {
     "paper": u"📄",
     "scissors": u"✂️",
 }
-DEFAULT_BEATS = {
-    "rock": "scissors",
-    "paper": "rock",
-    "scissors": "paper",
-}
-DEFAULT_LOSES_TO = {
-    "rock": "paper",
-    "paper": "scissors",
-    "scissors": "rock",
-}
-
-LOG_FILENAME = "rps_arena_log.txt"
+DEFAULT_BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+DEFAULT_LOSES_TO = {"rock": "paper", "paper": "scissors", "scissors": "rock"}
 
 # ---------------- Data model ----------------
 class Emoji(object):
@@ -75,32 +66,16 @@ def cap_speed(vx, vy, cap):
 
 # --- Color utilities (no Tk dependency required) ---
 _COLOR_NAME_MAP = {
-    # CSS-like basic names (common cases)
-    "black": (0, 0, 0),
-    "white": (255, 255, 255),
-    "red": (255, 0, 0),
-    "green": (0, 128, 0),
-    "blue": (0, 0, 255),
-    "yellow": (255, 255, 0),
-    "magenta": (255, 0, 255),
-    "fuchsia": (255, 0, 255),
-    "cyan": (0, 255, 255),
-    "aqua": (0, 255, 255),
-    "gray": (128, 128, 128),
-    "grey": (128, 128, 128),
-    "lightgray": (211, 211, 211),
-    "lightgrey": (211, 211, 211),
-    "darkgray": (169, 169, 169),
-    "darkgrey": (169, 169, 169),
-    "navy": (0, 0, 128),
-    "maroon": (128, 0, 0),
-    "purple": (128, 0, 128),
-    "teal": (0, 128, 128),
-    "olive": (128, 128, 0),
-    "silver": (192, 192, 192),
-    "lime": (0, 255, 0),
-    "orange": (255, 165, 0),
-    "pink": (255, 192, 203),
+    # Common color names (subset)
+    "black": (0, 0, 0), "white": (255, 255, 255), "red": (255, 0, 0),
+    "green": (0, 128, 0), "blue": (0, 0, 255), "yellow": (255, 255, 0),
+    "magenta": (255, 0, 255), "fuchsia": (255, 0, 255), "cyan": (0, 255, 255),
+    "aqua": (0, 255, 255), "gray": (128, 128, 128), "grey": (128, 128, 128),
+    "lightgray": (211, 211, 211), "lightgrey": (211, 211, 211),
+    "darkgray": (169, 169, 169), "darkgrey": (169, 169, 169),
+    "navy": (0, 0, 128), "maroon": (128, 0, 0), "purple": (128, 0, 128),
+    "teal": (0, 128, 128), "olive": (128, 128, 0), "silver": (192, 192, 192),
+    "lime": (0, 255, 0), "orange": (255, 165, 0), "pink": (255, 192, 203),
     "brown": (165, 42, 42),
 }
 
@@ -128,12 +103,9 @@ def _rgb_from_name_or_hex(color_str):
     rgb = _parse_hex_color(c)
     if rgb is not None:
         return rgb
-    if c in _COLOR_NAME_MAP:
-        return _COLOR_NAME_MAP[c]
-    return None
+    return _COLOR_NAME_MAP.get(c)
 
 def pick_contrast_color_from_rgb(rgb):
-    """Given (r,g,b) 0..255, return 'black' or 'white' for contrast."""
     r, g, b = rgb
     luminance = (0.299 * r + 0.587 * g + 0.114 * b)  # 0..255
     return "black" if luminance >= 128 else "white"
@@ -161,7 +133,8 @@ class RPSArena(object):
     def __init__(self, root, width, height, units_per_kind, delay_ms,
                  emoji=None, beats=None, loses_to=None,
                  fixed_seed=None, num_games=0,
-                 log_filename=LOG_FILENAME, ff_enabled=True,
+                 log_filename=DEFAULT_LOGFILE, no_log=False,
+                 ff_enabled=True,
                  background_color=DEFAULT_BACKGROUND, countdown_s=0,
                  windowless=False, quiet=False, showstats=False, blocks=DEFAULT_BLOCKS):
         self.root = root
@@ -183,11 +156,8 @@ class RPSArena(object):
         self.units_per_kind = max(1, int(units_per_kind))
         self.num_units = self.units_per_kind * len(self.kinds_order)
 
-        delay_ms = int(delay_ms)
-        if delay_ms <= 0:
-            delay_ms = 1
-        self.delay_ms = delay_ms
-        self.base_delay_ms = delay_ms
+        self.delay_ms = max(1, int(delay_ms))
+        self.base_delay_ms = self.delay_ms
 
         # Fast Forward
         self.ff_enabled = bool(ff_enabled)
@@ -204,7 +174,7 @@ class RPSArena(object):
         self._stats_item = None
 
         # Blocks (obstacles)
-        # Internal representation: list of dicts {'x1','y1','x2','y2','color'}
+        # Internal: list of dicts {'x1','y1','x2','y2','color'}
         self.blocks = []
         self.block_items = []        # canvas ids
         self.block_color = "white"   # default for random blocks
@@ -234,8 +204,9 @@ class RPSArena(object):
         random.seed(self.current_seed)
 
         # Logging
+        self.no_log = bool(no_log)
         self.log_filename = log_filename
-        self.logf = open(self.log_filename, "a")
+        self.logf = open(self.log_filename, "a") if not self.no_log else None
         self._write_log_header()
 
         # UI only if not windowless
@@ -285,8 +256,8 @@ class RPSArena(object):
     def _parse_blocks_option(self, blocks_opt):
         """
         Parse --blocks option which may be:
-          - "0" (or "00"...): no blocks
-          - an integer string: number of random blocks
+          - "0" (or other all-digit string) -> random count
+          - integer string: number of random blocks
           - a path to a JSON file with schema:
                 {"blocks":[{"top":int,"left":int,"width":int,"height":int,"color":"optional"}]}
         """
@@ -423,7 +394,6 @@ class RPSArena(object):
             h = random.randint(min_h, max_h)
             # Enforce per-block area cap
             if w * h > max_area:
-                # shrink h to fit area (keep >= min_h if possible)
                 h = max(int(max_area / max(w, 1)), min_h)
                 if h < min_h:
                     continue
@@ -495,8 +465,9 @@ class RPSArena(object):
 
     # ---------------- Logging helpers ----------------
     def _log(self, msg):
-        self.logf.write(msg + "\n")
-        self.logf.flush()
+        if self.logf is not None:
+            self.logf.write(msg + "\n")
+            self.logf.flush()
         if not self.quiet:
             print(msg)
 
@@ -506,19 +477,22 @@ class RPSArena(object):
         if self.blocks_mode == "random":
             blocks_desc += f"({self.blocks_count})"
         settings = ("start={0} | size={1}x{2} | units_per_kind={3} | total_units={4} | "
-                    "delay_ms={5} | seed={6} | kinds={7} | fast_forward={8} | num_games={9} | blocks={10}"
+                    "delay_ms={5} | seed={6} | kinds={7} | fast_forward={8} | num_games={9} | blocks={10} | "
+                    "file_logging={11} | logfile={12}"
                     .format(now, self.width, self.height,
                             self.units_per_kind, self.num_units,
                             self.delay_ms,
                             self.current_seed if self.fixed_seed is not None else "random",
                             ",".join(self.kinds_order),
                             "on" if self.ff_enabled else "off",
-                            self.num_games, blocks_desc))
+                            self.num_games, blocks_desc,
+                            "off" if self.no_log else "on",
+                            self.log_filename if not self.no_log else ""))
         self._log(settings)
         header = ["STEP"]
         for k in self.kinds_order:
             header.append(self.emoji.get(k, k))
-        self._log(",".join([unicode_safe(h) for h in header]))
+        self._log(",".join([str(h) for h in header]))
 
     def _log_counts_if_needed(self, converted_happened):
         if not converted_happened:
@@ -543,10 +517,10 @@ class RPSArena(object):
         return counts
 
     def reset(self):
-        if self._restart_after_id is not None and self.root is not None:
+        if not self.windowless and self._restart_after_id is not None and self.root is not None:
             self.root.after_cancel(self._restart_after_id)
             self._restart_after_id = None
-        if self._countdown_after_id is not None and self.root is not None:
+        if not self.windowless and self._countdown_after_id is not None and self.root is not None:
             self.root.after_cancel(self._countdown_after_id)
             self._countdown_after_id = None
 
@@ -951,7 +925,7 @@ class RPSArena(object):
 # ---------------- Utility ----------------
 def unicode_safe(x):
     try:
-        return unicode(x)
+        return str(x)
     except Exception:
         return x
 
@@ -968,7 +942,7 @@ def parse_args():
                    help="Random seed for first game; subsequent games use seed+1, seed+2, ...")
     p.add_argument("-n","--num-games", type=int, default=0,
                    help="Number of games to play (0=unlimited). Closes after last game.")
-    p.add_argument("--noff", action="store_true",
+    p.add_argument("--no-ff", action="store_true",
                    help="Disable Fast Forward (no auto-switch to delay=1)")
     p.add_argument("--bg", type=str, default=DEFAULT_BACKGROUND,
                    help="Background color or image filename (windowed). Colors: name or #RRGGBB.")
@@ -977,11 +951,15 @@ def parse_args():
     p.add_argument("--windowless", action="store_true",
                    help="Run without Tk window. If -n not set, defaults to 1.")
     p.add_argument("-q","--quiet", action="store_true",
-                   help="Suppress stdout log messages (still written to log file).")
+                   help="Suppress stdout log messages (file logging unaffected unless --no-log).")
     p.add_argument("--showstats", action="store_true",
                    help="Show elapsed time, step, and counts in lower-right corner (windowed only).")
     p.add_argument("--blocks", type=str, default=DEFAULT_BLOCKS,
                    help="Number of random blocks (e.g., '5') OR path to JSON file describing blocks.")
+    p.add_argument("--no-log", action="store_true",
+                   help="Disable logging to file (stdout still used unless --quiet).")
+    p.add_argument("--logfile", type=str, default=DEFAULT_LOGFILE,
+                   help=f"Log file name (default {DEFAULT_LOGFILE})")
     return p.parse_args()
 
 def main():
@@ -1009,7 +987,8 @@ def main():
     RPSArena(root, width, height, args.units, delay_ms,
              emoji=DEFAULT_EMOJI, beats=DEFAULT_BEATS, loses_to=DEFAULT_LOSES_TO,
              fixed_seed=args.seed, num_games=args.num_games,
-             log_filename=LOG_FILENAME, ff_enabled=(not args.noff),
+             log_filename=args.logfile, no_log=args.no_log,
+             ff_enabled=(not args.no_ff),
              background_color=args.bg, countdown_s=args.countdown,
              windowless=args.windowless, quiet=args.quiet,
              showstats=args.showstats, blocks=args.blocks)
