@@ -1,3 +1,4 @@
+import os
 import random
 import math
 import argparse
@@ -9,7 +10,7 @@ import sys
 DEFAULT_WIDTH, DEFAULT_HEIGHT = 800, 800
 DEFAULT_UNITS_PER_KIND = 50   # per emoji kind (3 kinds => total 150)
 DEFAULT_DELAY_MS = 30         # tick delay; 0 requested -> coerced to 1
-DEFAULT_BACKGROUND = "white"
+DEFAULT_BACKGROUND = "white"  # can now also be an image filename (windowed mode)
 
 FONT_SIZE = 24                # emoji font size
 RADIUS = 14                   # approximate collision radius for an emoji at FONT_SIZE
@@ -72,7 +73,7 @@ def cap_speed(vx, vy, cap):
 
 # --- Color utilities (no Tk dependency required) ---
 _COLOR_NAME_MAP = {
-    # CSS basic colors
+    # CSS-like basic names (common cases)
     "black": (0, 0, 0),
     "white": (255, 255, 255),
     "red": (255, 0, 0),
@@ -129,12 +130,18 @@ def _rgb_from_name_or_hex(color_str):
         return _COLOR_NAME_MAP[c]
     return None
 
+def pick_contrast_color_from_rgb(rgb):
+    """Given (r,g,b) 0..255, return 'black' or 'white' for contrast."""
+    r, g, b = rgb
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b)  # 0..255
+    return "black" if luminance >= 128 else "white"
+
 def pick_contrast_color(bgcolor, tk_root=None):
     """
-    Return 'black' or 'white' contrasting with bgcolor.
-    - First tries to parse known names / hex (#RGB/#RRGGBB) w/o Tk.
-    - If that fails and tk_root is provided, uses tk_root.winfo_rgb.
-    - Otherwise defaults to 'white'.
+    Contrast text color for a solid background:
+    - Try parse name/hex first (no Tk).
+    - If that fails and tk_root provided, try tk_root.winfo_rgb.
+    - Else default to 'white'.
     """
     rgb = _rgb_from_name_or_hex(bgcolor)
     if rgb is None and tk_root is not None:
@@ -145,10 +152,7 @@ def pick_contrast_color(bgcolor, tk_root=None):
             pass
     if rgb is None:
         return "white"
-    r, g, b = rgb
-    # simple luminance heuristic
-    luminance = (0.299 * r + 0.587 * g + 0.114 * b)  # 0..255
-    return "black" if luminance >= 128 else "white"
+    return pick_contrast_color_from_rgb(rgb)
 
 # ---------------- Simulation ----------------
 class RPSArena(object):
@@ -165,7 +169,7 @@ class RPSArena(object):
 
         self.width = int(width)
         self.height = int(height)
-        self.bg_color = background_color
+        self.bg_source = background_color  # color name/hex OR image path
 
         # Dictionaries (allow custom games)
         self.emoji = emoji if emoji is not None else DEFAULT_EMOJI
@@ -197,6 +201,12 @@ class RPSArena(object):
         # Stats overlay
         self._stats_item = None
 
+        # Background image state (windowed)
+        self._bg_item = None
+        self._bg_photo = None
+        self._bg_is_image = False
+        self._bg_contrast_color = "white"  # computed later if image
+
         # Multi-game controls
         self.num_games = max(0, int(num_games))  # 0 = unlimited
         self.games_played = 0
@@ -216,18 +226,24 @@ class RPSArena(object):
 
         # UI only if not windowless
         if not self.windowless:
-            # Import tkinter here to avoid any Tk cost in windowless mode
+            # Import tkinter only in windowed mode
             global tk
             import tkinter as tk  # type: ignore
             self.root.title(u"RPS Arena")
             self.canvas = tk.Canvas(
                 root, width=self.width, height=self.height,
-                bg=self.bg_color, highlightthickness=0
+                bg="white", highlightthickness=0
             )
             self.canvas.pack(fill="both", expand=True)
 
-            # Choose one contrasting text color for both stats & countdown
-            self.ui_text_color = pick_contrast_color(self.bg_color, tk_root=self.root)
+            # Apply background (color or image) and pick text color
+            self._apply_background(self.bg_source)
+
+            # Choose text color for overlays (based on bg)
+            if self._bg_is_image:
+                self.ui_text_color = self._bg_contrast_color
+            else:
+                self.ui_text_color = pick_contrast_color(self.bg_source, tk_root=self.root)
         else:
             self.canvas = None
             self.ui_text_color = "white"  # unused in windowless
@@ -246,6 +262,72 @@ class RPSArena(object):
             self.step()
         else:
             self.run_windowless()
+
+    # ---------------- Background handling (windowed) ----------------
+    def _apply_background(self, source):
+        """Apply a color or an image (stretched) as the canvas background."""
+        if self.canvas is None:
+            return
+
+        # Clear previous bg image if any
+        if self._bg_item is not None:
+            try:
+                self.canvas.delete(self._bg_item)
+            except Exception:
+                pass
+            self._bg_item = None
+            self._bg_photo = None
+        self._bg_is_image = False
+        self._bg_contrast_color = "white"
+
+        # If 'source' looks like a file, try to load as image
+        if isinstance(source, str) and os.path.isfile(source):
+            # Prefer PIL for resizing & luminance; fall back to Tk PhotoImage
+            pil_ok = False
+            try:
+                from PIL import Image, ImageTk, ImageStat  # type: ignore
+                pil_ok = True
+            except Exception:
+                Image = ImageTk = ImageStat = None  # type: ignore
+
+            if pil_ok:
+                try:
+                    img = Image.open(source).convert("RGB")
+                    img = img.resize((self.width, self.height), Image.LANCZOS)
+                    stat = ImageStat.Stat(img)
+                    means = stat.mean  # [R,G,B] 0..255
+                    self._bg_contrast_color = pick_contrast_color_from_rgb(tuple(int(m) for m in means))
+                    self._bg_photo = ImageTk.PhotoImage(img)
+                    self._bg_item = self.canvas.create_image(0, 0, image=self._bg_photo, anchor="nw")
+                    self.canvas.lower(self._bg_item)  # send to back
+                    self._bg_is_image = True
+                    return
+                except Exception as e:
+                    self._log(f"warning: failed to load image '{source}' via PIL: {e}; falling back to Tk PhotoImage")
+
+            # Fallback: Tk PhotoImage (may not resize)
+            try:
+                # We need tk imported; it is available in windowed mode
+                self._bg_photo = tk.PhotoImage(file=source)  # type: ignore
+                self._bg_item = self.canvas.create_image(0, 0, image=self._bg_photo, anchor="nw")
+                self.canvas.lower(self._bg_item)
+                self._bg_is_image = True
+                # Contrast fallback—assume dark average -> use white
+                self._bg_contrast_color = "white"
+                self._log("warning: PIL not available; background image not stretched.")
+                return
+            except Exception as e:
+                self._log(f"warning: failed to load background image '{source}': {e}. Using color fallback.")
+                # fall through to color
+
+        # Treat as color
+        try:
+            self.canvas.config(bg=source)
+        except Exception:
+            # Fallback color if invalid
+            self.canvas.config(bg="white")
+            self._log(f"warning: invalid background '{source}', defaulting to white.")
+        self._bg_is_image = False
 
     # ---------------- Logging helpers ----------------
     def _log(self, msg):
@@ -303,6 +385,9 @@ class RPSArena(object):
 
         if self.canvas is not None:
             self.canvas.delete("all")
+            # Re-apply background after clearing canvas
+            self._apply_background(self.bg_source)
+
         self.units = []
         self.step_num = 0
         self.game_start_time = time.time()
@@ -413,13 +498,10 @@ class RPSArena(object):
     def _update_countdown(self):
         if not self._in_countdown or self.canvas is None:
             return
-
         self.canvas.itemconfigure(self._countdown_item, text=str(self._countdown_remaining))
-
         if self._countdown_remaining <= 0:
             self._end_countdown()
             return
-
         self._countdown_remaining -= 1
         self._countdown_after_id = self.root.after(1000, self._update_countdown)
 
@@ -467,6 +549,7 @@ class RPSArena(object):
             fx += dx * ATTRACTION
             fy += dy * ATTRACTION
         elif closest_pred is not None:
+            dx, dy = normalize(me.x - closest_pred.x, me.y - me.y)
             dx, dy = normalize(me.x - closest_pred.x, me.y - closest_pred.y)
             fx += dx * REPULSION
             fy += dy * REPULSION
@@ -670,7 +753,7 @@ def parse_args():
     p.add_argument("--noff", action="store_true",
                    help="Disable Fast Forward (no auto-switch to delay=1)")
     p.add_argument("--bg", type=str, default=DEFAULT_BACKGROUND,
-                   help=f"Background color (default {DEFAULT_BACKGROUND})")
+                   help="Background color or image filename (windowed). Colors: name or #RRGGBB.")
     p.add_argument("--countdown", type=int, default=0,
                    help="Seconds to pause after placement (windowed only).")
     p.add_argument("--windowless", action="store_true",
@@ -698,7 +781,7 @@ def main():
         global tk
         import tkinter as tk  # type: ignore
         root = tk.Tk()
-        root.configure(bg=args.bg)
+        root.configure(bg="black")  # hidden by canvas; use neutral color
         root.geometry(f"{width}x{height}")
         root.resizable(False, False)
         root.title("RPS Arena")
